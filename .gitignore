@@ -1,0 +1,9 @@
+# ROS workspce
+build/
+devel/
+logs/
+.catkin_tools/
+.vscode/
+*.bag
+*.pyc
+__pycache__/

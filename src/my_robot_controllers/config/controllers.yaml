@@ -1,0 +1,4 @@
+controllers:
+  my_custom_controller:
+    type: "CRBT/MyCustomController"
+    publish_rate: 50

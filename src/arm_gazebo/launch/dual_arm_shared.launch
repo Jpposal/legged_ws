@@ -1,0 +1,62 @@
+<launch>
+  <!-- Arguments -->
+  <arg name="paused" default="false"/>
+  <arg name="use_sim_time" default="true"/>
+  <arg name="gui" default="true"/>
+  <arg name="headless" default="false"/>
+  <arg name="debug" default="false"/>
+
+  <!-- Start Gazebo -->
+  <include file="$(find gazebo_ros)/launch/empty_world.launch">
+    <arg name="debug" value="$(arg debug)" />
+    <arg name="gui" value="$(arg gui)" />
+    <arg name="paused" value="$(arg paused)"/>
+    <arg name="use_sim_time" value="$(arg use_sim_time)"/>
+    <arg name="headless" value="$(arg headless)"/>
+  </include>
+
+  <!-- Load URDF -->
+  <!-- You can change object_type to 'bar', 'cube', or 'sphere' -->
+  <arg name="object_type" default="bar"/>
+  <arg name="arm_gap" default="1.2"/>
+  <param name="robot_description" command="$(find xacro)/xacro --inorder '$(find arm_description)/urdf/dual_arm_shared_load.xacro' object_type:=$(arg object_type) arm_gap:=$(arg arm_gap)" />
+
+  <!-- Single Arm URDFs for Controllers -->
+  <!-- Calculate Arm2 Position based on arm_gap matches dual_arm_shared_load.xacro -->
+  <arg name="arm2_x" value="$(arg arm_gap)" />
+  
+  <param name="robot_description_arm1" command="$(find xacro)/xacro --inorder '$(find arm_description)/urdf/single_arm_loader.xacro' prefix:=arm1_ origin_xyz:='0 0 0' origin_rpy:='0 0 0'" />
+  <param name="robot_description_arm2" command="$(find xacro)/xacro --inorder '$(find arm_description)/urdf/single_arm_loader.xacro' prefix:=arm2_ origin_xyz:='$(arg arm2_x) 0 0' origin_rpy:='0 0 3.14159265359'" />
+
+
+  <!-- Spawn Robot -->
+  <node name="urdf_spawner" pkg="gazebo_ros" type="spawn_model" respawn="false" output="screen"
+        args="-urdf -model dual_arms -param robot_description" />
+
+  <!-- Load Controllers -->
+  <rosparam file="$(find arm_control)/config/dual_arm_controllers.yaml" command="load"/>
+
+  <!-- Start Controllers -->
+  <node name="controller_spawner" pkg="controller_manager" type="spawner" respawn="false"
+    output="screen" args="joint_state_controller arm_leader_controller arm_follower_controller"/>
+
+  <!-- Robot State Publisher -->
+  <node name="robot_state_publisher" pkg="robot_state_publisher" type="robot_state_publisher" respawn="false" output="screen">
+  </node>
+
+   <!-- Trajectory Publisher for Arm Leader -->
+   <node name="traj_publisher" pkg="arm_control" type="traj_publisher_node" output="screen">
+     <!-- Remap to the topic the arm_leader_controller is listening to -->
+     <!-- Assuming 'arm_leader_controller' listens on its own namespace -->
+     <remap from="/command_pose" to="/arm_leader_controller/command_pose"/>
+     <remap from="/command_twist" to="/arm_leader_controller/command_twist"/>
+     
+     <!-- Trajectory Parameters -->
+     <param name="center_x" value="0.6"/>
+     <param name="center_y" value="0.0"/>
+     <param name="center_z" value="0.4"/>
+     <param name="radius" value="0.1"/>
+     <param name="freq" value="0.5"/>
+   </node>
+
+</launch>

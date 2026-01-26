@@ -1,0 +1,10 @@
+<?xml version="1.0" ?>
+
+<launch>
+    <!-- Load parameters from YAML file -->
+    <rosparam file="$(find my_robot_controllers)/config/controllers.yaml" command="load"/>
+    <!-- Load and start the controller -->
+    <!-- 其他节点配置 -->
+    <node name="controller_spawner" pkg="controller_manager" type="spawner"
+          output="screen" args=" controllers/my_custom_controller"/>
+</launch>

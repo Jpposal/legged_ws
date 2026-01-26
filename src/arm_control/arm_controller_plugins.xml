@@ -1,0 +1,19 @@
+<library path="lib/libarm_controller_lib">
+  <class name="arm_control/ArmController" type="arm_control::ArmController" base_class_type="controller_interface::ControllerBase">
+    <description>
+      MPC Controller for Arm
+    </description>
+  </class>
+
+  <class name="arm_control/ArmController_Leader" type="arm_control::ArmController_Leader" base_class_type="controller_interface::ControllerBase">
+    <description>
+      Leader Controller for Dual Arm
+    </description>
+  </class>
+
+  <class name="arm_control/ArmController_Follower" type="arm_control::ArmController_Follower" base_class_type="controller_interface::ControllerBase">
+    <description>
+      Follower Controller for Dual Arm
+    </description>
+  </class>
+</library>

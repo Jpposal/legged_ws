@@ -1,0 +1,37 @@
+arm_controller:
+  type: arm_control/ArmController
+  
+  # Robot
+  urdf_file: "" # Will use robot_description if empty
+  ee_frame: "lbr_iiwa_link_7"
+  base_frame: "lbr_iiwa_base_link"
+  
+  # Trajectory (Sine Wave)
+  amplitude_x: 0.1
+  amplitude_y: 0.1
+  amplitude_z: 0.1
+  frequency: 0.5
+  phase_x: 0.0
+  phase_y: 0.0
+  phase_z: 1.57079632679 # PI/2
+  base_pos_x: 0.6
+  base_pos_y: 0.0
+  base_pos_z: 0.4
+  
+  # Control Gains (Computed Torque)
+  kp: 122.0
+  kd: 15.0
+  
+  # Joints
+  joint_names:
+    - lbr_iiwa_joint_1
+    - lbr_iiwa_joint_2
+    - lbr_iiwa_joint_3
+    - lbr_iiwa_joint_4
+    - lbr_iiwa_joint_5
+    - lbr_iiwa_joint_6
+    - lbr_iiwa_joint_7
+
+joint_state_controller:
+  type: joint_state_controller/JointStateController
+  publish_rate: 50

@@ -1,0 +1,43 @@
+arm_leader_controller:
+  type: arm_control/ArmController_Leader
+  robot_description_param: "/robot_description_arm1"
+  ee_frame: "arm1_link_7"
+  base_frame: "arm1_base_link"
+  kp: 100.0
+
+  kd: 10.0
+  joint_names:
+    - arm1_joint_1
+    - arm1_joint_2
+    - arm1_joint_3
+    - arm1_joint_4
+    - arm1_joint_5
+    - arm1_joint_6
+    - arm1_joint_7
+  base_pos_x: 0.5
+  base_pos_y: 0.0
+  base_pos_z: 0.0
+
+arm_follower_controller:
+  type: arm_control/ArmController_Follower
+  robot_description_param: "/robot_description_arm2"
+  ee_frame: "arm2_link_7"
+  base_frame: "arm2_base_link"
+  kp: 100.0
+
+  kd: 10.0
+  joint_names:
+    - arm2_joint_1
+    - arm2_joint_2
+    - arm2_joint_3
+    - arm2_joint_4
+    - arm2_joint_5
+    - arm2_joint_6
+    - arm2_joint_7
+  base_pos_x: -0.5
+  base_pos_y: 0.0
+  base_pos_z: 0.0
+
+joint_state_controller:
+  type: joint_state_controller/JointStateController
+  publish_rate: 50
