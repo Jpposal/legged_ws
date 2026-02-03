@@ -235,7 +235,7 @@
   <limit lower="-3.0541" upper="3.0541" effort="200" velocity="2.356" />
 </joint>
 
-  <!-- Payload (2kg) -->
+<!-- 
   <joint name="${prefix}payload_joint" type="fixed">
     <parent link="${prefix}link_7"/>
     <child link="${prefix}payload_link"/>
@@ -267,6 +267,7 @@
   <gazebo reference="${prefix}payload_link">
     <material>Gazebo/Grey</material>
   </gazebo>
+-->
 <link name="${prefix}base" />
 <joint name="${prefix}base_link-base" type="fixed">
   <origin xyz="0 0 0" rpy="0 0 0"/>

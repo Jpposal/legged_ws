@@ -8,19 +8,19 @@ arm_controller:
   
   # Trajectory (Sine Wave)
   amplitude_x: 0.1
-  amplitude_y: 0.1
+  amplitude_y: 0.0
   amplitude_z: 0.1
-  frequency: 0.5
+  frequency: 0.5                     # [Changed] 慢一点
   phase_x: 0.0
   phase_y: 0.0
-  phase_z: 1.57079632679 # PI/2
-  base_pos_x: 0.6
+  phase_z: 1.57079632679 
+  base_pos_x: -0.2                    # [Changed] 圆心位置
   base_pos_y: 0.0
-  base_pos_z: 0.4
+  base_pos_z: 1.0
   
   # Control Gains (Computed Torque)
-  kp: 122.0
-  kd: 15.0
+  kp: 1220.0
+  kd: 150.0
   
   # Joints
   joint_names:

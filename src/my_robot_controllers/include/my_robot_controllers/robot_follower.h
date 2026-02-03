@@ -34,10 +34,9 @@ public:
         tau.resize(6,1);
         state_robot.hat_o.resize(10);
         state_robot.dhat_o.resize(10);
-        state_robot.hat_o.setZero(); // Use setZero() instead of setRandom() for stable start
-    } 
+        state_robot.hat_o.setZero();} // 添加无参数构造函数
     ~Robot_Follower() {}
-    void initial(Vector3d r_, Vector3d x_init, Matrix3d R_init); // Expanded interface
+    void initial(Vector3d r_);
     void robotupdate(Vector3d w_d,Vector3d a_d,Vector3d al_d,State state,double dt,double T);
     void DREM(State state,double dt,double T);
     VectorXd F;
@@ -80,8 +79,8 @@ private:
                 Gamma.setZero(10,10);
                 Gamma.diagonal() << 2500, 2500, 2500, 2500,2500,\
                       2500, 2500,2500,2500,2500;
-                K_i=2000; // Increased stiffness from 100 to 2000
-                h=40;
+                K_i=50;
+                h=5;
                 lmd=1;
                 Kx=30;
                 Kv=30;

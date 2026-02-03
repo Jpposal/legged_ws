@@ -1,6 +1,7 @@
 #include <ros/ros.h>
 #include <geometry_msgs/PoseStamped.h>
 #include <geometry_msgs/TwistStamped.h>
+#include <geometry_msgs/AccelStamped.h>
 #include <cmath>
 #include <Eigen/Dense>
 
@@ -10,9 +11,13 @@ int main(int argc, char** argv) {
 
     ros::Publisher pose_pub = nh.advertise<geometry_msgs::PoseStamped>("/arm_leader_controller/command_pose", 1);
     ros::Publisher twist_pub = nh.advertise<geometry_msgs::TwistStamped>("/arm_leader_controller/command_twist", 1);
+    ros::Publisher accel_pub = nh.advertise<geometry_msgs::AccelStamped>("/arm_leader_controller/command_accel", 1);
 
-    // Subscriber to get the initial position from the controller
-    // We use a latching-like behavior: read once to set the center
+    // [Added] Follower publishers (Follower receives command_twist & command_accel for trajectory tracking/estimation)
+    ros::Publisher pose_pub_fol = nh.advertise<geometry_msgs::PoseStamped>("/arm_follower_controller/command_pose", 1);
+    ros::Publisher twist_pub_fol = nh.advertise<geometry_msgs::TwistStamped>("/arm_follower_controller/command_twist", 1);
+    ros::Publisher accel_pub_fol = nh.advertise<geometry_msgs::AccelStamped>("/arm_follower_controller/command_accel", 1);
+
     bool initial_pose_found = false;
     double center_x = 0.6, center_y = 0.0, center_z = 0.5; // Defaults
     
@@ -34,9 +39,18 @@ int main(int argc, char** argv) {
 
     double freq = 0.5; // Hz
     double radius = 0.1; // meters
+    std::string plane = "yz"; // Plane to draw circle in: "xy", "yz", "xz"
 
+    // Try to load parameters from launch file
     nh.param("freq", freq, 0.5);
     nh.param("radius", radius, 0.1);
+    nh.param<std::string>("plane", plane, "yz");
+    
+    // If center pose is provided in params, use it and don't wait for subscriber
+    if (nh.getParam("center_x", center_x) && nh.getParam("center_y", center_y) && nh.getParam("center_z", center_z)) {
+        ROS_INFO("Using center pose from parameters: [%.4f, %.4f, %.4f]", center_x, center_y, center_z);
+        initial_pose_found = true;
+    }
 
     ROS_INFO("Waiting for initial robot pose...");
     while (ros::ok() && !initial_pose_found) {
@@ -45,7 +59,7 @@ int main(int argc, char** argv) {
     }
 
     ROS_INFO("Starting Circle Trajectory Publisher.");
-    ROS_INFO("Center: [%.2f, %.2f, %.2f], Radius: %.2f", center_x, center_y, center_z, radius);
+    ROS_INFO("Center: [%.2f, %.2f, %.2f], Radius: %.2f, Plane: %s", center_x, center_y, center_z, radius, plane.c_str());
     
     ros::Duration(1.0).sleep(); 
     ros::Time start_time = ros::Time::now();
@@ -62,21 +76,52 @@ int main(int argc, char** argv) {
         }
 
         double x_ref = center_x;
-        double y_ref = center_y + current_radius * sin(omega * t);
-        double z_ref = center_z + current_radius * cos(omega * t);
-
-        double vx_ref = 0.0;
-        double vy_ref = current_radius * omega * cos(omega * t);
-        double vz_ref = -current_radius * omega * sin(omega * t);
+        double y_ref = center_y;
+        double z_ref = center_z;
         
-        // Add ramp derivative to velocity (optional but more correct)
-        if (t < 5.0) {
-             double dr = radius / 5.0;
-             y_ref = center_y + current_radius * sin(omega * t);
-             z_ref = center_z + current_radius * cos(omega * t);
-             // v = dr/dt * pos_unit + r * d(pos_unit)/dt
-             vy_ref = dr * sin(omega * t) + current_radius * omega * cos(omega * t);
-             vz_ref = dr * cos(omega * t) - current_radius * omega * sin(omega * t);
+        double vx_ref = 0.0;
+        double vy_ref = 0.0;
+        double vz_ref = 0.0;
+
+        double sin_t = sin(omega * t);
+        double cos_t = cos(omega * t);
+
+        // Ramp derivative for smooth start
+        double dr = (t < 5.0) ? (radius / 5.0) : 0.0;
+        
+        // Acceleration Terms (assuming ramp is slow enough to ignore 2nd derivative of r)
+        // ax = dd(r) * sin + 2 * dr * w * cos - r * w^2 * sin
+        // Since r is linear, ddr = 0
+        
+        double ddr = 0.0;
+        double ax_ref = 0.0, ay_ref = 0.0, az_ref = 0.0;
+
+        if (plane == "yz") {
+            y_ref = center_y + current_radius * sin_t;
+            z_ref = center_z + current_radius * cos_t;
+            vy_ref = dr * sin_t + current_radius * omega * cos_t;
+            vz_ref = dr * cos_t - current_radius * omega * sin_t;
+            
+            ay_ref = 2 * dr * omega * cos_t - current_radius * omega * omega * sin_t;
+            az_ref = -2 * dr * omega * sin_t - current_radius * omega * omega * cos_t;
+            
+        } else if (plane == "xz") {
+            x_ref = center_x + current_radius * sin_t;
+            z_ref = center_z + current_radius * cos_t;
+            vx_ref = dr * sin_t + current_radius * omega * cos_t;
+            vz_ref = dr * cos_t - current_radius * omega * sin_t;
+            
+            ax_ref = 2 * dr * omega * cos_t - current_radius * omega * omega * sin_t;
+            az_ref = -2 * dr * omega * sin_t - current_radius * omega * omega * cos_t;
+            
+        } else if (plane == "xy") {
+            x_ref = center_x + current_radius * sin_t;
+            y_ref = center_y + current_radius * cos_t;
+            vx_ref = dr * sin_t + current_radius * omega * cos_t;
+            vy_ref = dr * cos_t - current_radius * omega * sin_t;
+            
+            ax_ref = 2 * dr * omega * cos_t - current_radius * omega * omega * sin_t;
+            ay_ref = -2 * dr * omega * sin_t - current_radius * omega * omega * cos_t;
         }
 
         geometry_msgs::PoseStamped pose_msg;
@@ -100,9 +145,24 @@ int main(int argc, char** argv) {
         twist_msg.twist.angular.x = 0.0;
         twist_msg.twist.angular.y = 0.0;
         twist_msg.twist.angular.z = 0.0;
+        
+        geometry_msgs::AccelStamped accel_msg;
+        accel_msg.header.stamp = current_time;
+        accel_msg.header.frame_id = "world";
+        accel_msg.accel.linear.x = ax_ref;
+        accel_msg.accel.linear.y = ay_ref;
+        accel_msg.accel.linear.z = az_ref;
+        accel_msg.accel.angular.x = 0.0;
+        accel_msg.accel.angular.y = 0.0;
+        accel_msg.accel.angular.z = 0.0;
 
         pose_pub.publish(pose_msg);
         twist_pub.publish(twist_msg);
+        accel_pub.publish(accel_msg);
+
+        pose_pub_fol.publish(pose_msg);
+        twist_pub_fol.publish(twist_msg);
+        accel_pub_fol.publish(accel_msg);
 
         ros::spinOnce();
         loop_rate.sleep();

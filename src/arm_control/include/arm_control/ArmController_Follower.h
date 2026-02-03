@@ -6,7 +6,9 @@
 #include <ros/ros.h>
 #include <geometry_msgs/PoseStamped.h>
 #include <geometry_msgs/TwistStamped.h>
+#include <geometry_msgs/AccelStamped.h>
 #include <geometry_msgs/WrenchStamped.h>
+#include <gazebo_msgs/ModelStates.h>
 
 // Pinocchio
 #include <pinocchio/fwd.hpp>
@@ -45,6 +47,7 @@ private:
   // Gains & Params
   double kp_, kd_;
   Eigen::Vector3d basePos_;
+  Eigen::Vector3d anchor_offset_;
 
   // Time
   ros::Time startTime_;
@@ -57,6 +60,7 @@ private:
   // Subscribers
   ros::Subscriber cmdPoseSub_;
   ros::Subscriber cmdTwistSub_;
+  ros::Subscriber cmdAccelSub_;
   ros::Subscriber cmdWrenchSub_;
 
   // Command Data
@@ -64,13 +68,26 @@ private:
   Eigen::Matrix3d targetRot_;
   Eigen::Vector3d targetVel_;
   Eigen::Vector3d targetAngVel_;
+  Eigen::Vector3d targetAcc_;
+  Eigen::Vector3d targetAngAcc_;
   Eigen::Matrix<double, 6, 1> targetWrench_;
   bool hasCommand_;
 
   // Callbacks
   void cmdPoseCallback(const geometry_msgs::PoseStamped::ConstPtr& msg);
   void cmdTwistCallback(const geometry_msgs::TwistStamped::ConstPtr& msg);
+  void cmdAccelCallback(const geometry_msgs::AccelStamped::ConstPtr& msg);
   void cmdWrenchCallback(const geometry_msgs::WrenchStamped::ConstPtr& msg);
+  void gazeboStatesCallback(const gazebo_msgs::ModelStates::ConstPtr& msg);
+
+  // Gazebo Truth Data
+  ros::Subscriber sub_gazebo_states_;
+  std::string object_name_; 
+  bool sim_state_received_;
+  Eigen::Vector3d true_pos_;
+  Eigen::Vector3d true_vel_;
+  Eigen::Vector3d true_omega_;
+  Eigen::Matrix3d true_rot_;
 };
 
 } // namespace arm_control

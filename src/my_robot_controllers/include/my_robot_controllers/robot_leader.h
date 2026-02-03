@@ -36,7 +36,7 @@ public:
         tau.resize(6,1);
         state_robot.hat_o.resize(10);
         state_robot.dhat_o.resize(10);
-        state_robot.hat_o.setZero(); // Changed from setRandom() to setZero() to avoid initial instabilities
+        state_robot.hat_o.setZero();
     } // 添加无参数构造函数
     ~Robot_Leader() {}
     void initial(Vector3d r_);
@@ -45,7 +45,6 @@ public:
     Eigen::VectorXd F;
     Eigen::VectorXd tau;
 
-    Eigen::VectorXd get_hat_o() const { return state_robot.hat_o; }
 
 private:
     Vector3d r;
@@ -83,8 +82,8 @@ private:
                 Gamma.setZero(10,10);
                 Gamma.diagonal() << 2500, 2500, 2500, 2500,2500,\
                       2500, 2500,2500,2500,2500;
-                K_i=2500; // Increased from 1500 to 2500 for better stiffness
-                h=40;
+                K_i=500;
+                h=5;
                 lmd=1;
                 Kx=30;
                 Kv=30;

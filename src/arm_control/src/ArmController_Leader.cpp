@@ -14,6 +14,7 @@
 #include <geometry_msgs/WrenchStamped.h>
 #include <std_msgs/Float64MultiArray.h>
 #include <fstream>
+#include <algorithm>
 
 namespace arm_control {
 
@@ -29,12 +30,24 @@ bool ArmController_Leader::init(hardware_interface::EffortJointInterface* hw, ro
   std::cerr << "ee_frame param: " << eeFrame << std::endl;
   nh.param<double>("kp", kp_, 100.0);
   nh.param<double>("kd", kd_, 10.0);
+  nh.param<bool>("use_drem", use_drem_, true);
+
+  // if (!use_drem_) {
+  //     ROS_WARN("DREM and Task Space Algo DISABLED. Running pure Joint ID Control.");
+  // }
   
   double bx, by, bz;
   nh.param<double>("base_pos_x", bx, 0.0);
   nh.param<double>("base_pos_y", by, 0.0);
   nh.param<double>("base_pos_z", bz, 0.8);
   basePos_ << bx, by, bz;
+  
+  double ax, ay, az;
+  nh.param<double>("anchor_offset_x", ax, 0.6);
+  nh.param<double>("anchor_offset_y", ay, 0.0);
+  nh.param<double>("anchor_offset_z", az, 0.15);
+  anchor_offset_ << ax, ay, az;
+  ROS_INFO_STREAM("Leader Anchor Offset (EE->CoM): " << anchor_offset_.transpose());
 
   //还是读取通过dual_arm_controllers.yaml加载的参数
   if (urdfFile.empty()) {
@@ -45,7 +58,7 @@ bool ArmController_Leader::init(hardware_interface::EffortJointInterface* hw, ro
        ROS_ERROR("Failed to find 'robot_description_param' in controller configuration. Please set it in your .yaml file.");
        return false;
     }
-  //读取单机械臂的urdf描述
+  //读取单机械臂的urdf
     std::string urdfString;
     if (nh_.getParam(robotDescriptionParam, urdfString)) {
        ROS_INFO_STREAM("Found URDF string at parameter: " << robotDescriptionParam);
@@ -53,7 +66,7 @@ bool ArmController_Leader::init(hardware_interface::EffortJointInterface* hw, ro
        ROS_ERROR_STREAM("Failed to find URDF string at parameter: " << robotDescriptionParam);
        return false;
     }
-    //缓存单机械臂的urdf描述到临时文件
+    //缓存单机械臂的urdf
     if (!urdfString.empty()) {
        std::string ns = nh_.getNamespace();
        std::replace(ns.begin(), ns.end(), '/', '_');
@@ -153,6 +166,12 @@ bool ArmController_Leader::init(hardware_interface::EffortJointInterface* hw, ro
   targetWrench_.setZero();
   hasCommand_ = false;
 
+  // Initialize Gazebo Truth
+  sim_state_received_ = false;
+  nh.param<std::string>("object_name", object_name_, "shared_block");
+  sub_gazebo_states_ = nh.subscribe("/gazebo/model_states", 1, &ArmController_Leader::gazeboStatesCallback, this);
+  ROS_INFO_STREAM("Subscribed to /gazebo/model_states, looking for object: " << object_name_);
+
   ROS_INFO("ArmController_Leader initialized successfully");
   return true;
 }
@@ -190,7 +209,9 @@ void ArmController_Leader::update(const ros::Time& time, const ros::Duration& pe
   Eigen::Matrix3d R_cur = pinocchioData_->oMf[eeFrameId_].rotation();
   //初始化，参数写死在这里leader_algo_.initial(Eigen::Vector3d(0.5, 0.0, 0.15)); 
   if (!leader_initialized) {
-      leader_algo_.initial(Eigen::Vector3d::Zero()); 
+      // Pass NEGATIVE offset because algorithm implementation expects r = (CoM - EE)
+      // while anchor_offset_ is (EE - CoM)
+      leader_algo_.initial(-anchor_offset_); 
       traj_center = x_cur;
 
       if (!hasCommand_) {
@@ -216,6 +237,16 @@ void ArmController_Leader::update(const ros::Time& time, const ros::Duration& pe
   state.v = v_cur_spatial.head<3>();
   state.w = v_cur_spatial.tail<3>();
   state.dq.resize(6);
+  state.dq << state.v, state.w; 
+
+  // [GAZEBO TRUTH OVERRIDE]
+  if (sim_state_received_) {
+      state.x = true_pos_;
+      state.R = true_rot_;
+      state.v = true_vel_;
+      state.w = true_omega_;
+      state.dq << state.v, state.w;
+  }
 
   if (!hasCommand_) {
     ROS_WARN_THROTTLE(2.0, "Waiting for command... Robot holding initial position.");
@@ -228,12 +259,21 @@ void ArmController_Leader::update(const ros::Time& time, const ros::Duration& pe
   target.a_d = Eigen::Vector3d::Zero();
   target.al_d = Eigen::Vector3d::Zero();
 
-  //转给leader算法模块计算tau_ext
-  leader_algo_.robotupdate(target, state, dt);
-  leader_algo_.DREM(target, state, dt, t);
+  Eigen::VectorXd wrench_command(6);
+  Eigen::VectorXd joint_tau(numJoints_);
 
-  Eigen::VectorXd wrench_command = leader_algo_.tau; 
-  Eigen::VectorXd joint_tau = J.transpose() * wrench_command;
+  // if (use_drem_) {
+      //转给leader算法模块计算tau_ext
+      leader_algo_.robotupdate(target, state, dt);
+      leader_algo_.DREM(target, state, dt, t);
+
+      wrench_command = leader_algo_.tau; 
+      joint_tau = J.transpose() * wrench_command;
+  // } else {
+  //     // 单臂空载模式：不运行DREM，外力补偿为0
+  //     wrench_command.setZero();
+  //     joint_tau.setZero();
+  // }
 
   Eigen::Matrix3d R_des = target.R_d;
   Eigen::Vector3d x_des = target.x_d;
@@ -290,19 +330,19 @@ void ArmController_Leader::update(const ros::Time& time, const ros::Duration& pe
   Eigen::VectorXd gravity_comp = pinocchioData_->g;
 
   //增加力矩限幅
-  double torque_limit = 300.0;
+  double torque_limit = 30000.0;
   for (size_t i = 0; i < numJoints_; ++i) {
       if (tau_final(i) > torque_limit) tau_final(i) = torque_limit;
       if (tau_final(i) < -torque_limit) tau_final(i) = -torque_limit;
   }
 
   // 发布DREM参数，以便分析发散原因
-  std_msgs::Float64MultiArray params_msg;
-  Eigen::VectorXd hats = leader_algo_.get_hat_o();
-  for(int i=0; i<10; i++) params_msg.data.push_back(hats(i));
-  dremParamsPub_.publish(params_msg);
+  // std_msgs::Float64MultiArray params_msg;
+  // Eigen::VectorXd hats = leader_algo_.get_hat_o();
+  // for(int i=0; i<10; i++) params_msg.data.push_back(hats(i));
+  // dremParamsPub_.publish(params_msg);
 
-  // 打印关键信息排查倒伏问题：维度、算法输出力矩、雅可比转换力矩、最终下发力矩
+  // 打印debug信息：维度、算法输出力矩、雅可比转换力矩、最终下发力矩
   // 增加打印：位置误差
   Eigen::Vector3d pos_error = target.x_d - state.x;
   // [DEBUG] 增加了打印 gravity_comp(1) 以便观察重力矩大小
@@ -332,7 +372,7 @@ void ArmController_Leader::update(const ros::Time& time, const ros::Duration& pe
 
   geometry_msgs::PoseStamped poseMsg;
   poseMsg.header.stamp = time;
-  poseMsg.header.frame_id = "base_link";
+  poseMsg.header.frame_id = "world";
   poseMsg.pose.position.x = translation.x();
   poseMsg.pose.position.y = translation.y();
   poseMsg.pose.position.z = translation.z();
@@ -346,7 +386,7 @@ void ArmController_Leader::update(const ros::Time& time, const ros::Duration& pe
   Eigen::VectorXd v_cur = J * currentQdot_; // 6D Twist
   geometry_msgs::TwistStamped twistMsg;
   twistMsg.header.stamp = time;
-  twistMsg.header.frame_id = "base_link";
+  twistMsg.header.frame_id = "world";
   twistMsg.twist.linear.x = v_cur(0);
   twistMsg.twist.linear.y = v_cur(1);
   twistMsg.twist.linear.z = v_cur(2);
@@ -374,6 +414,25 @@ void ArmController_Leader::cmdTwistCallback(const geometry_msgs::TwistStamped::C
 void ArmController_Leader::cmdWrenchCallback(const geometry_msgs::WrenchStamped::ConstPtr& msg) {
   targetWrench_ << msg->wrench.force.x, msg->wrench.force.y, msg->wrench.force.z,
                    msg->wrench.torque.x, msg->wrench.torque.y, msg->wrench.torque.z;
+}
+
+void ArmController_Leader::gazeboStatesCallback(const gazebo_msgs::ModelStates::ConstPtr& msg) {
+  auto it = std::find(msg->name.begin(), msg->name.end(), object_name_);
+  if (it != msg->name.end()) {
+      int index = std::distance(msg->name.begin(), it);
+      const auto& p = msg->pose[index].position;
+      const auto& q = msg->pose[index].orientation;
+      const auto& v = msg->twist[index].linear;
+      const auto& w = msg->twist[index].angular;
+
+      true_pos_ << p.x, p.y, p.z;
+      Eigen::Quaterniond quat(q.w, q.x, q.y, q.z);
+      true_rot_ = quat.toRotationMatrix();
+      true_vel_ << v.x, v.y, v.z;
+      true_omega_ << w.x, w.y, w.z;
+
+      sim_state_received_ = true;
+  }
 }
 
 }

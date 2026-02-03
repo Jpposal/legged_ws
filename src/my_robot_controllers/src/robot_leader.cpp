@@ -107,8 +107,7 @@ void Robot_Leader::DREM(Target target,State state,double dt,double t){//传入ta
     rho = 1/(1e-6+pow(drem.phi,2));
 
     y1 = DREM_sim(drem.phi,state_robot.hat_o,drem.taue,rho,dt);
-    // [FIX] Disable parameter adaptation for now to test pure PD/Tracking performance
-    // state_robot.hat_o = -gain.Gamma*state_robot.Yr.transpose()*state_robot.s*dt + y1;  
+    state_robot.hat_o = -gain.Gamma*state_robot.Yr.transpose()*state_robot.s*dt + y1;  
 
 
     // dynamics

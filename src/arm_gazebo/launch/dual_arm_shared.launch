@@ -52,11 +52,12 @@
      <remap from="/command_twist" to="/arm_leader_controller/command_twist"/>
      
      <!-- Trajectory Parameters -->
-     <param name="center_x" value="0.6"/>
+     <param name="center_x" value="-0.2"/>
      <param name="center_y" value="0.0"/>
-     <param name="center_z" value="0.4"/>
+     <param name="center_z" value="1.0"/>
      <param name="radius" value="0.1"/>
      <param name="freq" value="0.5"/>
+     <param name="plane" value="xz"/>
    </node>
 
 </launch>

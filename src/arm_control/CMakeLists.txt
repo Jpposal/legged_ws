@@ -15,6 +15,7 @@ find_package(catkin REQUIRED COMPONENTS
   hardware_interface
   pluginlib
   geometry_msgs
+  gazebo_msgs
   my_robot_controllers
 )
 
@@ -28,7 +29,7 @@ pkg_check_modules(hpp_fcl REQUIRED hpp-fcl)
 catkin_package(
   INCLUDE_DIRS include
   LIBRARIES arm_controller_lib
-  CATKIN_DEPENDS roscpp controller_interface hardware_interface pluginlib geometry_msgs
+  CATKIN_DEPENDS roscpp controller_interface hardware_interface pluginlib geometry_msgs gazebo_msgs
   DEPENDS Boost
 )
 

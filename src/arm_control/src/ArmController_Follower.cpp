@@ -31,6 +31,13 @@ bool ArmController_Follower::init(hardware_interface::EffortJointInterface* hw, 
   nh.param<double>("base_pos_z", bz, 0.8);
   basePos_ << bx, by, bz;
 
+  double ax, ay, az;
+  nh.param<double>("anchor_offset_x", ax, 0.6);
+  nh.param<double>("anchor_offset_y", ay, 0.0);
+  nh.param<double>("anchor_offset_z", az, 0.15);
+  anchor_offset_ << ax, ay, az;
+  ROS_INFO_STREAM("Follower Anchor Offset (EE->CoM): " << anchor_offset_.transpose());
+
   //还是读取通过dual_arm_controllers.yaml加载的参数
   if (urdfFile.empty()) {
     std::string robotDescriptionParam;
@@ -116,6 +123,7 @@ bool ArmController_Follower::init(hardware_interface::EffortJointInterface* hw, 
 
   cmdPoseSub_ = nh.subscribe("command_pose", 1, &ArmController_Follower::cmdPoseCallback, this);      //接收目标位姿
   cmdTwistSub_ = nh.subscribe("command_twist", 1, &ArmController_Follower::cmdTwistCallback, this);   //接收目标速度
+  cmdAccelSub_ = nh.subscribe("command_accel", 1, &ArmController_Follower::cmdAccelCallback, this);   //接收目标加速度
   cmdWrenchSub_ = nh.subscribe("command_wrench", 1, &ArmController_Follower::cmdWrenchCallback, this);//接收输出力矩
 
   //初始化
@@ -123,8 +131,16 @@ bool ArmController_Follower::init(hardware_interface::EffortJointInterface* hw, 
   targetRot_.setIdentity();
   targetVel_.setZero();
   targetAngVel_.setZero();
+  targetAcc_.setZero();
+  targetAngAcc_.setZero();
   targetWrench_.setZero();
   hasCommand_ = false;
+
+  // Initialize Gazebo Truth
+  sim_state_received_ = false;
+  nh.param<std::string>("object_name", object_name_, "shared_block");
+  sub_gazebo_states_ = nh.subscribe("/gazebo/model_states", 1, &ArmController_Follower::gazeboStatesCallback, this);
+  ROS_INFO_STREAM("Follower Subscribed to /gazebo/model_states, looking for object: " << object_name_);
 
   ROS_INFO("ArmController_Follower initialized successfully");
   return true;
@@ -163,7 +179,8 @@ void ArmController_Follower::update(const ros::Time& time, const ros::Duration& 
 
   if (!follower_initialized) {
       // Use current pose for initialization to avoid jump
-      follower_algo_.initial(Eigen::Vector3d::Zero(), x_cur, R_cur); 
+      // Pass NEGATIVE offset to match algo's torque transform sign convention
+      follower_algo_.initial(-anchor_offset_); 
       follower_initialized = true;
       ROS_INFO_STREAM("Follower Initialized at: " << x_cur.transpose());
   }
@@ -182,19 +199,32 @@ void ArmController_Follower::update(const ros::Time& time, const ros::Duration& 
   state.w = v_cur_spatial.tail<3>();
   
   state.dq.resize(6);
+  state.dq << state.v, state.w;
+
+  // [GAZEBO TRUTH OVERRIDE]
+  if (sim_state_received_) {
+      state.x = true_pos_;
+      state.R = true_rot_;
+      state.v = true_vel_;
+      state.w = true_omega_;
+      state.dq << state.v, state.w;
+  }
   
   // if (!hasCommand_) {
   //     ROS_WARN_THROTTLE(2.0, "Follower Waiting for command... Holding position.");
   // }
   
+  // Use subscribed accelerations directly
+  Eigen::Vector3d a_des = targetAcc_;
+  Eigen::Vector3d al_des = targetAngAcc_;
+  
   // Update order: robotupdate FIRST, then DREM (consistent with Leader logic)
-  follower_algo_.robotupdate(Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero(), state, dt, t);
+  follower_algo_.robotupdate(targetAngVel_, a_des, al_des, state, dt, t);
   follower_algo_.DREM(state, dt, t);
 
   Eigen::VectorXd wrench_command = follower_algo_.tau; 
   Eigen::VectorXd joint_tau = J.transpose() * wrench_command;
 
-  // [Added] 1. CLIK (Inverse Kinematics) - 移植自 ArmController.cpp
   Eigen::Matrix3d R_des = targetRot_;
   Eigen::Vector3d x_des = targetPos_;
   Eigen::Vector3d xdot_des = targetVel_;
@@ -237,7 +267,6 @@ void ArmController_Follower::update(const ros::Time& time, const ros::Duration& 
   }
   qdot_ref_prev = qdot_ref;
 
-  // [Added] 2. ID (Computed Torque) - 移植自 ArmController.cpp
   pinocchio::crba(pinocchioModel_, *pinocchioData_, currentQ_);
   pinocchioData_->M.triangularView<Eigen::StrictlyLower>() = pinocchioData_->M.transpose().triangularView<Eigen::StrictlyLower>();
 
@@ -246,7 +275,6 @@ void ArmController_Follower::update(const ros::Time& time, const ros::Duration& 
 
   Eigen::VectorXd tau_model = pinocchioData_->M * qddot_ref + pinocchioData_->C * qdot_ref + pinocchioData_->g;
 
-  // [Modified] 3. Final Torque Calculation
   // tau_final = joint_tau (外部/DREM) + tau_model (自身动力学) + kd * (dq_ref - dq) (跟踪误差)
   Eigen::VectorXd tau_final = tau_model + kd_ * (qdot_ref - currentQdot_) + joint_tau;
 
@@ -254,7 +282,7 @@ void ArmController_Follower::update(const ros::Time& time, const ros::Duration& 
   Eigen::VectorXd gravity_comp = pinocchioData_->g;
 
   // Saturation
-  double torque_limit = 300.0;
+  double torque_limit = 30000.0;
   for (size_t i = 0; i < numJoints_; ++i) {
       if (tau_final(i) > torque_limit) tau_final(i) = torque_limit;
       if (tau_final(i) < -torque_limit) tau_final(i) = -torque_limit;
@@ -319,10 +347,34 @@ void ArmController_Follower::cmdTwistCallback(const geometry_msgs::TwistStamped:
   targetVel_ << msg->twist.linear.x, msg->twist.linear.y, msg->twist.linear.z;
   targetAngVel_ << msg->twist.angular.x, msg->twist.angular.y, msg->twist.angular.z;
 }
+void ArmController_Follower::cmdAccelCallback(const geometry_msgs::AccelStamped::ConstPtr& msg) {
+  targetAcc_ << msg->accel.linear.x, msg->accel.linear.y, msg->accel.linear.z;
+  targetAngAcc_ << msg->accel.angular.x, msg->accel.angular.y, msg->accel.angular.z;
+}
+
 //接收my_controllers的follower发回来的力矩的回调函数
 void ArmController_Follower::cmdWrenchCallback(const geometry_msgs::WrenchStamped::ConstPtr& msg) {
   targetWrench_ << msg->wrench.force.x, msg->wrench.force.y, msg->wrench.force.z,
                    msg->wrench.torque.x, msg->wrench.torque.y, msg->wrench.torque.z;
+}
+
+void ArmController_Follower::gazeboStatesCallback(const gazebo_msgs::ModelStates::ConstPtr& msg) {
+  auto it = std::find(msg->name.begin(), msg->name.end(), object_name_);
+  if (it != msg->name.end()) {
+      int index = std::distance(msg->name.begin(), it);
+      const auto& p = msg->pose[index].position;
+      const auto& q = msg->pose[index].orientation;
+      const auto& v = msg->twist[index].linear;
+      const auto& w = msg->twist[index].angular;
+
+      true_pos_ << p.x, p.y, p.z;
+      Eigen::Quaterniond quat(q.w, q.x, q.y, q.z);
+      true_rot_ = quat.toRotationMatrix();
+      true_vel_ << v.x, v.y, v.z;
+      true_omega_ << w.x, w.y, w.z;
+
+      sim_state_received_ = true;
+  }
 }
 
 } // namespace arm_control

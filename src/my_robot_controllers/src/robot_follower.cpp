@@ -10,12 +10,8 @@ const Eigen::Matrix3d zero_3 = Eigen::Matrix3d::Zero();
 
 
 
-void Robot_Follower::initial(Vector3d r_, Vector3d x_init, Matrix3d R_init){
+void Robot_Follower::initial(Vector3d r_){
         r=r_;
-        state_robot.x_d_hat = x_init;
-        state_robot.R_d_hat = R_init;
-        state_robot.v_d_hat.setZero();
-        state_robot.w_d_hat.setZero();
 }
 
 void Robot_Follower::robotupdate(Vector3d w_d,Vector3d a_d,Vector3d al_d,State state,double dt,double T){//传入some target、state、dt和t

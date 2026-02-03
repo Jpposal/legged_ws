@@ -50,6 +50,8 @@ private:
   // Publishers
   ros::Publisher eePosePub_;
   ros::Publisher eeTargetPub_;
+  ros::Publisher debugErrorPub_;
+  ros::Publisher debugWrenchPub_;
 };
 
 } // namespace arm_control

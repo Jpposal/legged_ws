@@ -1,0 +1,64 @@
+<launch>
+  <!-- Arguments -->
+  <arg name="paused" default="false"/>
+  <arg name="use_sim_time" default="true"/>
+  <arg name="gui" default="true"/>
+  <arg name="headless" default="false"/>
+  <arg name="debug" default="false"/>
+  <arg name="use_drem" default="false"/>
+
+  <!-- 1. Start Gazebo with Empty World -->
+  <include file="$(find gazebo_ros)/launch/empty_world.launch">
+    <arg name="debug" value="$(arg debug)" />
+    <arg name="gui" value="$(arg gui)" />
+    <arg name="paused" value="$(arg paused)"/>
+    <arg name="use_sim_time" value="$(arg use_sim_time)"/>
+    <arg name="headless" value="$(arg headless)"/>
+  </include>
+
+  <!-- 2. Load Single Arm URDF -->
+  <!-- 使用 'arm1_' 前缀，匹配配置文件中 Leader 的定义 -->
+  <!-- 机械臂基座放在原点 (0,0,0) -->
+  <param name="robot_description" command="$(find xacro)/xacro --inorder '$(find arm_description)/urdf/single_arm_loader.xacro' prefix:=arm1_ origin_xyz:='0 0 0' origin_rpy:='0 0 0'" />
+
+  <!-- 3. 设置 Controller 需要的 robot_description 参数 -->
+  <!-- Leader Controller 在 yaml 中读取 robot_description_arm1 -->
+  <param name="robot_description_arm1" command="$(find xacro)/xacro --inorder '$(find arm_description)/urdf/single_arm_loader.xacro' prefix:=arm1_ origin_xyz:='0 0 0' origin_rpy:='0 0 0'" />
+  
+  <!-- 4. Spawn Robot in Gazebo -->
+  <node name="urdf_spawner" pkg="gazebo_ros" type="spawn_model" respawn="false" output="screen"
+        args="-urdf -model single_arm_leader -param robot_description" />
+
+  <!-- 5. Load Controllers Config -->
+  <!-- 复用现有的双臂配置文件，但只启动 Leader -->
+  <rosparam file="$(find arm_control)/config/dual_arm_controllers.yaml" command="load"/>
+
+  <!-- [Modified] Toggle DREM for single arm test -->
+  <param name="arm_leader_controller/use_drem" value="$(arg use_drem)"/>
+
+  <!-- 6. Start Parameter Tuner (Optional, if used) or just Controllers -->
+  <!-- 只启动 joint_state_controller 和 arm_leader_controller -->
+  <node name="controller_spawner" pkg="controller_manager" type="spawner" respawn="false"
+    output="screen" args="joint_state_controller arm_leader_controller"/>
+
+  <!-- 7. Robot State Publisher -->
+  <node name="robot_state_publisher" pkg="robot_state_publisher" type="robot_state_publisher" respawn="false" output="screen">
+  </node>
+
+   <!-- 8. Trajectory Publisher for Arm Leader (画圆) -->
+   <node name="traj_publisher" pkg="arm_control" type="traj_publisher_node" output="screen">
+     <!-- Remap to the topic the arm_leader_controller is listening to -->
+     <remap from="/command_pose" to="/arm_leader_controller/command_pose"/>
+     <remap from="/command_twist" to="/arm_leader_controller/command_twist"/>
+     
+     <!-- Trajectory Parameters (确保圆心在机械臂工作空间内) -->
+     <!-- 假设机械臂在 0,0,0, 伸展半径约 0.8m -->
+     <param name="center_x" value="-0.2"/> 
+     <param name="center_y" value="0.0"/>
+     <param name="center_z" value="1.0"/>
+     <param name="radius" value="0.1"/>
+     <param name="freq" value="0.5"/>
+     <param name="plane" value="xz"/>
+   </node>
+
+</launch>

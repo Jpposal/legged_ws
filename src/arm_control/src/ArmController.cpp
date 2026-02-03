@@ -8,6 +8,8 @@
 #include <pinocchio/algorithm/kinematics.hpp>
 #include <geometry_msgs/PointStamped.h>
 #include <geometry_msgs/PoseStamped.h>
+#include <geometry_msgs/Vector3Stamped.h>
+#include <geometry_msgs/WrenchStamped.h>
 #include <fstream>
 #include <algorithm>
 
@@ -98,6 +100,8 @@ bool ArmController::init(hardware_interface::EffortJointInterface* hw, ros::Node
   // 4. Publishers
   eePosePub_ = nh.advertise<geometry_msgs::PoseStamped>("ee_pose", 1);
   eeTargetPub_ = nh.advertise<geometry_msgs::PointStamped>("ee_pose_target", 1);
+  debugErrorPub_ = nh.advertise<geometry_msgs::Vector3Stamped>("debug_pos_error", 1);
+  debugWrenchPub_ = nh.advertise<geometry_msgs::WrenchStamped>("debug_cmd_wrench", 1);
 
   return true;
 }
@@ -203,6 +207,19 @@ void ArmController::update(const ros::Time& time, const ros::Duration& period) {
   }
   
   // 7. Publish Visualization
+  geometry_msgs::Vector3Stamped err_msg;
+  err_msg.header.stamp = time;
+  err_msg.header.frame_id = "world";
+  err_msg.vector.x = e_pos(0);
+  err_msg.vector.y = e_pos(1);
+  err_msg.vector.z = e_pos(2);
+  debugErrorPub_.publish(err_msg);
+
+  geometry_msgs::WrenchStamped wrench_msg;
+  wrench_msg.header.stamp = time;
+  wrench_msg.header.frame_id = "world";
+  debugWrenchPub_.publish(wrench_msg);
+
   geometry_msgs::PointStamped msg;
   msg.header.stamp = time;
   msg.header.frame_id = "world";
