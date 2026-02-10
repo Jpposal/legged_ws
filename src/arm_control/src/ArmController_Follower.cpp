@@ -10,6 +10,9 @@
 #include <pinocchio/algorithm/model.hpp>
 #include <geometry_msgs/PointStamped.h>
 #include <geometry_msgs/PoseStamped.h>
+#include <geometry_msgs/Vector3Stamped.h>
+#include <geometry_msgs/WrenchStamped.h>
+#include <nav_msgs/Odometry.h>
 #include <fstream>
 
 namespace arm_control {
@@ -136,11 +139,11 @@ bool ArmController_Follower::init(hardware_interface::EffortJointInterface* hw, 
   targetWrench_.setZero();
   hasCommand_ = false;
 
-  // Initialize Gazebo Truth
+  calibration_rot_.setIdentity();
+
   sim_state_received_ = false;
-  nh.param<std::string>("object_name", object_name_, "shared_block");
-  sub_gazebo_states_ = nh.subscribe("/gazebo/model_states", 1, &ArmController_Follower::gazeboStatesCallback, this);
-  ROS_INFO_STREAM("Follower Subscribed to /gazebo/model_states, looking for object: " << object_name_);
+  sub_object_state_ = nh.subscribe("/shared_object/state", 1, &ArmController_Follower::objectStateCallback, this);
+  ROS_INFO("Follower Subscribed to /shared_object/state for GROUND TRUTH CoM state.");
 
   ROS_INFO("ArmController_Follower initialized successfully");
   return true;
@@ -177,12 +180,42 @@ void ArmController_Follower::update(const ros::Time& time, const ros::Duration& 
   Eigen::Vector3d x_cur = pinocchioData_->oMf[eeFrameId_].translation();
   Eigen::Matrix3d R_cur = pinocchioData_->oMf[eeFrameId_].rotation();
 
+  static bool debug_frame_printed = false;
+  if (!debug_frame_printed) {
+      ROS_INFO_STREAM("Follower EE Pos (Using Pinocchio): " << x_cur.transpose());
+      // Check arm2_base_link placement
+      if (pinocchioModel_.existFrame("arm2_base_link")) {
+          auto id = pinocchioModel_.getFrameId("arm2_base_link");
+          ROS_INFO_STREAM("Follower Base Link Placement: \n" << pinocchioData_->oMf[id]);
+      } else {
+          // Fallback to checking frame 1 or 2
+           ROS_WARN("Frame arm2_base_link not found in Follower model! Dumping Frame 1:");
+           ROS_INFO_STREAM("Frame 1: " << pinocchioModel_.frames[1].name << " -> " << pinocchioData_->oMf[1]);
+      }
+      debug_frame_printed = true;
+  }
+
   if (!follower_initialized) {
-      // Use current pose for initialization to avoid jump
-      // Pass NEGATIVE offset to match algo's torque transform sign convention
-      follower_algo_.initial(-anchor_offset_); 
+      if (!sim_state_received_) {
+        ROS_WARN_THROTTLE(1.0, "Follower waiting for /shared_object/state to initialize...");
+        return; 
+      }       
+
+      // Initialize algorithm with physical offset
+      follower_algo_.initial(anchor_offset_); 
       follower_initialized = true;
-      ROS_INFO_STREAM("Follower Initialized at: " << x_cur.transpose());
+
+      // Calculate initial rotation offset (Grasp Matrix Rotation Part)
+      // We want R_ee = R_object * R_calib
+      // So R_calib = R_object.T * R_ee_current
+      calibration_rot_ = true_rot_.transpose() * R_cur;
+      ROS_INFO_STREAM("Follower Calibration Rotation (Object->EE Offset):\n" << calibration_rot_);
+
+      if (!hasCommand_) {
+          targetPos_ = true_pos_; // Initialize target to CURRENT OBJECT POSITION
+          targetRot_ = true_rot_;
+          ROS_INFO_STREAM("Follower Initialized targetPos_ (CoM) to: " << true_pos_.transpose());
+      }
   }
 
   State state;
@@ -191,44 +224,62 @@ void ArmController_Follower::update(const ros::Time& time, const ros::Duration& 
   Eigen::MatrixXd J(6, numJoints_);
   J.setZero();
   pinocchio::computeFrameJacobian(pinocchioModel_, *pinocchioData_, currentQ_, eeFrameId_, pinocchio::LOCAL_WORLD_ALIGNED, J);
-  Eigen::VectorXd v_cur_spatial = J * currentQdot_;       //计算末端空间速度
-  //更新状态
-  state.x = x_cur;
-  state.R = R_cur;
-  state.v = v_cur_spatial.head<3>();
-  state.w = v_cur_spatial.tail<3>();
   
-  state.dq.resize(6);
-  state.dq << state.v, state.w;
-
-  // [GAZEBO TRUTH OVERRIDE]
-  if (sim_state_received_) {
       state.x = true_pos_;
       state.R = true_rot_;
       state.v = true_vel_;
       state.w = true_omega_;
+      state.dq.resize(6);
       state.dq << state.v, state.w;
-  }
-  
-  // if (!hasCommand_) {
-  //     ROS_WARN_THROTTLE(2.0, "Follower Waiting for command... Holding position.");
-  // }
-  
-  // Use subscribed accelerations directly
-  Eigen::Vector3d a_des = targetAcc_;
+
+  Eigen::Vector3d a_des_ee = targetAcc_;
   Eigen::Vector3d al_des = targetAngAcc_;
+
+  // Transform Target Acceleration to CoM
+  Eigen::Vector3d r_world = R_cur * anchor_offset_; // Recalculate for current step
+  Eigen::Vector3d a_des_com = a_des_ee + al_des.cross(r_world) + targetAngVel_.cross(targetAngVel_.cross(r_world));
   
-  // Update order: robotupdate FIRST, then DREM (consistent with Leader logic)
-  follower_algo_.robotupdate(targetAngVel_, a_des, al_des, state, dt, t);
+  // Update order: robotupdate FIRST, then DREM
+  follower_algo_.robotupdate(targetAngVel_, a_des_com, al_des, state, dt, t);
   follower_algo_.DREM(state, dt, t);
 
+  // Output Torque is already at JOINTS level (or EE level depending on algo impl, assuming EE Wrench here)
+  // [CORRECTION] Leader code implies .tau is 6D Wrench. 
+  // Since we initialized with offset, this Wrench should be at EE.
   Eigen::VectorXd wrench_command = follower_algo_.tau; 
+
+  static long long total_drem_steps = 0;
+  static long long valid_drem_steps = 0;
+  total_drem_steps++;
+  bool valid = true;
+
+  // [SAFETY CLAMP FOR IMMUTABLE ALGOTITHM]
+  // Modified: Saturate instead of Zeroing out
+  double safe_limit = 200.0;
+  if (std::isnan(wrench_command.norm())) {
+      valid = false;
+      ROS_WARN_THROTTLE(0.5, "DREM Wrench NaN detected. Clamping to ZERO.");
+      wrench_command.setZero();
+  } else if (wrench_command.norm() > safe_limit) { 
+      valid = false;
+      ROS_WARN_THROTTLE(0.5, "DREM Wrench EXPLOSION detected (norm=%f). Saturated to %f.", wrench_command.norm(), safe_limit);
+      wrench_command = wrench_command.normalized() * safe_limit; // Preserve direction, clamp magnitude
+  }
+  
+  if(valid) valid_drem_steps++;
+  double acceptance_rate = (total_drem_steps > 0) ? (100.0 * valid_drem_steps / total_drem_steps) : 0.0;
+
   Eigen::VectorXd joint_tau = J.transpose() * wrench_command;
 
-  Eigen::Matrix3d R_des = targetRot_;
-  Eigen::Vector3d x_des = targetPos_;
+  // Apply calibration offset to target rotation to get Desired EE Rotation
+  Eigen::Matrix3d R_des = targetRot_ * calibration_rot_;
+  Eigen::Vector3d x_des_com = targetPos_;
   Eigen::Vector3d xdot_des = targetVel_;
   Eigen::Vector3d omega_des = targetAngVel_;
+
+  // [Fix Feedback Loop] Convert CoM Target -> EE Target
+  Eigen::Vector3d r_des_world = R_des * anchor_offset_;
+  Eigen::Vector3d x_des_ee = x_des_com - r_des_world;
 
   // 复用已计算的 J 和 x_cur, R_cur
   double lambda = 0.01;
@@ -236,7 +287,7 @@ void ArmController_Follower::update(const ros::Time& time, const ros::Duration& 
   Eigen::MatrixXd JJT_damped = JJT + lambda * lambda * Eigen::MatrixXd::Identity(6, 6);
   Eigen::MatrixXd J_pinv = J.transpose() * JJT_damped.inverse();
 
-  Eigen::Vector3d e_pos = x_des - x_cur;
+  Eigen::Vector3d e_pos = x_des_ee - x_cur;
   Eigen::Matrix3d R_err = R_des * R_cur.transpose();
   Eigen::Vector3d e_orient;
   e_orient << 0.5 * (R_err(2,1) - R_err(1,2)),
@@ -265,6 +316,21 @@ void ArmController_Follower::update(const ros::Time& time, const ros::Duration& 
   if (dt > 1e-6) {
     qddot_ref = (qdot_ref - qdot_ref_prev) / dt;
   }
+  
+  // Debug High Acceleration
+  /* 
+  // [DISABLED] Acceleration Feedforward causing instability due to numerical noise
+  if (dt > 1e-6) {
+    qddot_ref = (qdot_ref - qdot_ref_prev) / dt;
+  }
+  
+  if (qddot_ref.norm() > 100.0) {
+      ROS_WARN_THROTTLE(1.0, "High Accel Detected: qddot_ref norm = %f", qddot_ref.norm());
+      qddot_ref.setZero(); // Safety Clamp
+  }
+  */
+  qddot_ref.setZero(); // Force disable acceleration feedforward
+  
   qdot_ref_prev = qdot_ref;
 
   pinocchio::crba(pinocchioModel_, *pinocchioData_, currentQ_);
@@ -273,16 +339,25 @@ void ArmController_Follower::update(const ros::Time& time, const ros::Duration& 
   pinocchio::computeCoriolisMatrix(pinocchioModel_, *pinocchioData_, currentQ_, currentQdot_);
   pinocchio::computeGeneralizedGravity(pinocchioModel_, *pinocchioData_, currentQ_);
 
-  Eigen::VectorXd tau_model = pinocchioData_->M * qddot_ref + pinocchioData_->C * qdot_ref + pinocchioData_->g;
+  // [MODIFIED] Using Gravity-Free Model (since Gazebo gravity is disabled)
+  // Removed pinocchioData_->g from tau_model
+  Eigen::VectorXd tau_model = pinocchioData_->M * qddot_ref + pinocchioData_->C * qdot_ref; 
 
   // tau_final = joint_tau (外部/DREM) + tau_model (自身动力学) + kd * (dq_ref - dq) (跟踪误差)
-  Eigen::VectorXd tau_final = tau_model + kd_ * (qdot_ref - currentQdot_) + joint_tau;
+  Eigen::VectorXd pd_term = kd_ * (qdot_ref - currentQdot_);
+  Eigen::VectorXd tau_final = tau_model + pd_term + joint_tau;
+
+  static double last_print_time = 0.0;
+  if (t - last_print_time > 0.5) {
+      ROS_INFO_STREAM("M_Tau: " << tau_model.norm() << " | PD_Tau: " << pd_term.norm() << " | DREM_Tau: " << joint_tau.norm() << " | Wrench: " << wrench_command.norm() << " | J_cond: " << J.norm() << " | Acc_Rate: " << acceptance_rate << "%");
+      last_print_time = t;
+  }
 
   // 保留变量定义供兼容
   Eigen::VectorXd gravity_comp = pinocchioData_->g;
 
   // Saturation
-  double torque_limit = 30000.0;
+  double torque_limit = 30000000.0;
   for (size_t i = 0; i < numJoints_; ++i) {
       if (tau_final(i) > torque_limit) tau_final(i) = torque_limit;
       if (tau_final(i) < -torque_limit) tau_final(i) = -torque_limit;
@@ -358,23 +433,20 @@ void ArmController_Follower::cmdWrenchCallback(const geometry_msgs::WrenchStampe
                    msg->wrench.torque.x, msg->wrench.torque.y, msg->wrench.torque.z;
 }
 
-void ArmController_Follower::gazeboStatesCallback(const gazebo_msgs::ModelStates::ConstPtr& msg) {
-  auto it = std::find(msg->name.begin(), msg->name.end(), object_name_);
-  if (it != msg->name.end()) {
-      int index = std::distance(msg->name.begin(), it);
-      const auto& p = msg->pose[index].position;
-      const auto& q = msg->pose[index].orientation;
-      const auto& v = msg->twist[index].linear;
-      const auto& w = msg->twist[index].angular;
+void ArmController_Follower::objectStateCallback(const nav_msgs::Odometry::ConstPtr& msg) {
+  // Directly extract state from Odometry message
+  const auto& p = msg->pose.pose.position;
+  const auto& q = msg->pose.pose.orientation;
+  const auto& v = msg->twist.twist.linear;
+  const auto& w = msg->twist.twist.angular;
 
-      true_pos_ << p.x, p.y, p.z;
-      Eigen::Quaterniond quat(q.w, q.x, q.y, q.z);
-      true_rot_ = quat.toRotationMatrix();
-      true_vel_ << v.x, v.y, v.z;
-      true_omega_ << w.x, w.y, w.z;
+  true_pos_ << p.x, p.y, p.z;
+  Eigen::Quaterniond quat(q.w, q.x, q.y, q.z);
+  true_rot_ = quat.toRotationMatrix();
+  true_vel_ << v.x, v.y, v.z;
+  true_omega_ << w.x, w.y, w.z;
 
-      sim_state_received_ = true;
-  }
+  sim_state_received_ = true;
 }
 
 } // namespace arm_control

@@ -8,6 +8,7 @@
 
   <!-- Start Gazebo -->
   <include file="$(find gazebo_ros)/launch/empty_world.launch">
+    <arg name="world_name" value="$(find arm_gazebo)/worlds/no_gravity.world"/>
     <arg name="debug" value="$(arg debug)" />
     <arg name="gui" value="$(arg gui)" />
     <arg name="paused" value="$(arg paused)"/>
@@ -45,19 +46,31 @@
   </node>
 
    <!-- Trajectory Publisher for Arm Leader -->
-   <node name="traj_publisher" pkg="arm_control" type="traj_publisher_node" output="screen">
+   <node name="object_target_publisher" pkg="arm_control" type="object_target_publisher" output="screen">
      <!-- Remap to the topic the arm_leader_controller is listening to -->
      <!-- Assuming 'arm_leader_controller' listens on its own namespace -->
      <remap from="/command_pose" to="/arm_leader_controller/command_pose"/>
      <remap from="/command_twist" to="/arm_leader_controller/command_twist"/>
      
      <!-- Trajectory Parameters -->
-     <param name="center_x" value="-0.2"/>
+     <param name="center_x" value="0.6"/>
      <param name="center_y" value="0.0"/>
-     <param name="center_z" value="1.0"/>
+     <param name="center_z" value="0.9"/>
      <param name="radius" value="0.1"/>
      <param name="freq" value="0.5"/>
      <param name="plane" value="xz"/>
    </node>
+
+   <!-- Shared Object State Publisher (Gazebo -> Odom) -->
+   <node name="object_state_pub" pkg="arm_control" type="object_state_publisher" output="screen">
+       <param name="object_name" value="dual_arms::shared_block"/>
+       <param name="output_topic" value="/shared_object/state"/>
+   </node>
+
+   <!-- Real-time Plotting Nodes (Optional) -->
+   <arg name="show_plots" default="true"/>
+   <group if="$(arg show_plots)">
+     <node name="leader_plotter" pkg="arm_control" type="plot_tracking.py" output="screen" />
+   </group>
 
 </launch>

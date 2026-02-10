@@ -34,7 +34,9 @@ public:
         tau.resize(6,1);
         state_robot.hat_o.resize(10);
         state_robot.dhat_o.resize(10);
-        state_robot.hat_o.setZero();} // 添加无参数构造函数
+        state_robot.hat_o.resize(10);
+        state_robot.hat_o.setZero();
+    } // 添加无参数构造函数
     ~Robot_Follower() {}
     void initial(Vector3d r_);
     void robotupdate(Vector3d w_d,Vector3d a_d,Vector3d al_d,State state,double dt,double T);
@@ -77,11 +79,12 @@ private:
             Eigen::MatrixXd Gamma;                              // gains 改了，记得检查 /tagg 
             Gains(){
                 Gamma.setZero(10,10);
-                Gamma.diagonal() << 2500, 2500, 2500, 2500,2500,\
-                      2500, 2500,2500,2500,2500;
-                K_i=50;
-                h=5;
-                lmd=1;
+                Gamma.diagonal() << 500, 0, 0, 0, 500, 0, 0, 500, 0, 500; 
+                
+                // Gamma.setZero(); // Set Gamma to 0 to freeze adaptation
+                K_i=500;
+                h=30;
+                lmd=2;
                 Kx=30;
                 Kv=30;
                 Ka=1;

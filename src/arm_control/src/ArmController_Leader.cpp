@@ -12,6 +12,7 @@
 #include <geometry_msgs/PoseStamped.h>
 #include <geometry_msgs/Vector3Stamped.h>
 #include <geometry_msgs/WrenchStamped.h>
+#include <nav_msgs/Odometry.h>
 #include <std_msgs/Float64MultiArray.h>
 #include <fstream>
 #include <algorithm>
@@ -166,11 +167,10 @@ bool ArmController_Leader::init(hardware_interface::EffortJointInterface* hw, ro
   targetWrench_.setZero();
   hasCommand_ = false;
 
-  // Initialize Gazebo Truth
+  // Initialize Gazebo Truth (Now via Standardized Odom Topic)
   sim_state_received_ = false;
-  nh.param<std::string>("object_name", object_name_, "shared_block");
-  sub_gazebo_states_ = nh.subscribe("/gazebo/model_states", 1, &ArmController_Leader::gazeboStatesCallback, this);
-  ROS_INFO_STREAM("Subscribed to /gazebo/model_states, looking for object: " << object_name_);
+  sub_object_state_ = nh.subscribe("/shared_object/state", 1, &ArmController_Leader::objectStateCallback, this);
+  ROS_INFO("Subscribed to /shared_object/state for GROUND TRUTH CoM state.");
 
   ROS_INFO("ArmController_Leader initialized successfully");
   return true;
@@ -205,19 +205,29 @@ void ArmController_Leader::update(const ros::Time& time, const ros::Duration& pe
   pinocchio::forwardKinematics(pinocchioModel_, *pinocchioData_, currentQ_, currentQdot_);
   pinocchio::updateFramePlacements(pinocchioModel_, *pinocchioData_);
   //算出来机械臂末端现在在世界坐标系的哪个位置 (x_cur) 和朝向 (R_cur)
-  Eigen::Vector3d x_cur = pinocchioData_->oMf[eeFrameId_].translation();
+  Eigen::Vector3d x_cur_ee = pinocchioData_->oMf[eeFrameId_].translation();
   Eigen::Matrix3d R_cur = pinocchioData_->oMf[eeFrameId_].rotation();
-  //初始化，参数写死在这里leader_algo_.initial(Eigen::Vector3d(0.5, 0.0, 0.15)); 
+  Eigen::Vector3d x_cur_com = x_cur_ee - R_cur * anchor_offset_;
+
+  // [MODIFIED] Initialization Logic: Wait for Ground Truth
   if (!leader_initialized) {
-      // Pass NEGATIVE offset because algorithm implementation expects r = (CoM - EE)
-      // while anchor_offset_ is (EE - CoM)
-      leader_algo_.initial(-anchor_offset_); 
-      traj_center = x_cur;
+      if (!sim_state_received_) {
+        // If we haven't received the object state yet, we cannot initialize the controller safely.
+        // We skip the control loop this cycle (maintaining zero/gravity torque or holding).
+        ROS_WARN_THROTTLE(1.0, "Waiting for /shared_object/state to initialize controller...");
+        return; 
+      }
+
+      // Initialize algorithm with physical offset
+      leader_algo_.initial(anchor_offset_); 
+      
+      // Use the received GROUND TRUTH for initialization
+      traj_center = true_pos_; 
 
       if (!hasCommand_) {
-          targetPos_ = x_cur;
-          targetRot_ = R_cur;
-          ROS_INFO_STREAM("Initialized targetPos_ to current pose: " << x_cur.transpose());
+          targetPos_ = true_pos_; // Initialize target to CURRENT OBJECT POSITION
+          targetRot_ = true_rot_;
+          ROS_INFO_STREAM("Initialized targetPos_ (CoM) from GT to: " << true_pos_.transpose());
       }
 
       leader_initialized = true;
@@ -230,62 +240,84 @@ void ArmController_Leader::update(const ros::Time& time, const ros::Duration& pe
   Eigen::MatrixXd J(6, numJoints_);
   J.setZero();
   pinocchio::computeFrameJacobian(pinocchioModel_, *pinocchioData_, currentQ_, eeFrameId_, pinocchio::LOCAL_WORLD_ALIGNED, J);
-  Eigen::VectorXd v_cur_spatial = J * currentQdot_;       //计算末端空间速度
-  //更新状态
-  state.x = x_cur;
-  state.R = R_cur;
-  state.v = v_cur_spatial.head<3>();
-  state.w = v_cur_spatial.tail<3>();
-  state.dq.resize(6);
-  state.dq << state.v, state.w; 
-
-  // [GAZEBO TRUTH OVERRIDE]
+  
+  // Directly use Received Object State (Sim-to-Real Architecture)
   if (sim_state_received_) {
       state.x = true_pos_;
       state.R = true_rot_;
       state.v = true_vel_;
       state.w = true_omega_;
+      state.dq.resize(6);
       state.dq << state.v, state.w;
+  } else {
+       // Fallback for safety until first message
+       state.x = x_cur_com; 
+       state.R = R_cur;
+       state.v.setZero();
+       state.w.setZero();
+       state.dq.resize(6);
+       state.dq.setZero();
   }
+
 
   if (!hasCommand_) {
     ROS_WARN_THROTTLE(2.0, "Waiting for command... Robot holding initial position.");
   }
   
+  // [Target Assignment]
+  // targetPos_ is the DESIRED CoM Position (from Object Target Publisher)
+  // No transformation needed as the publisher sends CoM targets directly.
+  
+  Eigen::Matrix3d R_d = targetRot_;
+  
   target.x_d = targetPos_;
   target.v_d = targetVel_;
   target.R_d = targetRot_;
   target.w_d = targetAngVel_;
-  target.a_d = Eigen::Vector3d::Zero();
+  target.a_d = Eigen::Vector3d::Zero(); // Simplified: Ignoring w_dot x r for now or assuming small
   target.al_d = Eigen::Vector3d::Zero();
 
   Eigen::VectorXd wrench_command(6);
   Eigen::VectorXd joint_tau(numJoints_);
 
-  // if (use_drem_) {
-      //转给leader算法模块计算tau_ext
-      leader_algo_.robotupdate(target, state, dt);
-      leader_algo_.DREM(target, state, dt, t);
+  leader_algo_.robotupdate(target, state, dt);
+  leader_algo_.DREM(target, state, dt, t);
+  wrench_command = leader_algo_.tau;
 
-      wrench_command = leader_algo_.tau; 
-      joint_tau = J.transpose() * wrench_command;
-  // } else {
-  //     // 单臂空载模式：不运行DREM，外力补偿为0
-  //     wrench_command.setZero();
-  //     joint_tau.setZero();
-  // }
+  static long long total_drem_steps = 0;
+  static long long valid_drem_steps = 0;
+  total_drem_steps++;
+  bool valid = true;
+
+  // [SAFETY CLAMP FOR IMMUTABLE ALGORITHM]
+  if (wrench_command.norm() > 200.0 || std::isnan(wrench_command.norm())) {
+      valid = false;
+      ROS_WARN_THROTTLE(0.5, "LEADER DREM Wrench EXPLOSION detected (norm=%f). Clamping to ZERO to protect sim.", wrench_command.norm());
+      wrench_command.setZero();
+  }
+  
+  if(valid) valid_drem_steps++;
+  double acceptance_rate = (total_drem_steps > 0) ? (100.0 * valid_drem_steps / total_drem_steps) : 0.0;
+
+  joint_tau = J.transpose() * wrench_command;
 
   Eigen::Matrix3d R_des = target.R_d;
-  Eigen::Vector3d x_des = target.x_d;
+  Eigen::Vector3d x_des_com = target.x_d; // This is CoM Desired
   Eigen::Vector3d xdot_des = target.v_d;
   Eigen::Vector3d omega_des = target.w_d;
+
+  // [Fix Feedback Loop] Convert CoM Target -> EE Target
+  // x_ee_des = x_com_des - R_des * offset
+  Eigen::Vector3d r_des_world = R_des * anchor_offset_;
+  Eigen::Vector3d x_des_ee = x_des_com - r_des_world;
 
   double lambda = 0.01;
   Eigen::MatrixXd JJT = J * J.transpose();
   Eigen::MatrixXd JJT_damped = JJT + lambda * lambda * Eigen::MatrixXd::Identity(6, 6);
   Eigen::MatrixXd J_pinv = J.transpose() * JJT_damped.inverse();
 
-  Eigen::Vector3d e_pos = x_des - x_cur;
+  // Calculate error in EE Frame
+  Eigen::Vector3d e_pos = x_des_ee - x_cur_ee;
   Eigen::Matrix3d R_err = R_des * R_cur.transpose();
   Eigen::Vector3d e_orient;
   e_orient << 0.5 * (R_err(2,1) - R_err(1,2)),
@@ -300,8 +332,8 @@ void ArmController_Leader::update(const ros::Time& time, const ros::Duration& pe
   xdot_task_des.head<3>() = xdot_des;
   xdot_task_des.tail<3>() = omega_des;
 
-  double K_pos = 10.0;
-  double K_orient = 5.0;
+  double K_pos = 100.0;
+  double K_orient = 50.0;
   Eigen::Matrix<double, 6, 1> K_gains;
   K_gains << K_pos, K_pos, K_pos, K_orient, K_orient, K_orient;
 
@@ -322,15 +354,14 @@ void ArmController_Leader::update(const ros::Time& time, const ros::Duration& pe
   pinocchio::computeCoriolisMatrix(pinocchioModel_, *pinocchioData_, currentQ_, currentQdot_);
   pinocchio::computeGeneralizedGravity(pinocchioModel_, *pinocchioData_, currentQ_);
 
-  Eigen::VectorXd tau_model = pinocchioData_->M * qddot_ref + pinocchioData_->C * qdot_ref + pinocchioData_->g;
+  Eigen::VectorXd tau_model = pinocchioData_->M * qddot_ref + pinocchioData_->C * qdot_ref; // + pinocchioData_->g;
 
-  //Final Torque Calculation (M*ddq + C*dq + g + DREM_force + Tracking_Feedback)
   Eigen::VectorXd tau_final = tau_model + kd_ * (qdot_ref - currentQdot_) + joint_tau;
 
   Eigen::VectorXd gravity_comp = pinocchioData_->g;
 
   //增加力矩限幅
-  double torque_limit = 30000.0;
+  double torque_limit = 30000000.0;
   for (size_t i = 0; i < numJoints_; ++i) {
       if (tau_final(i) > torque_limit) tau_final(i) = torque_limit;
       if (tau_final(i) < -torque_limit) tau_final(i) = -torque_limit;
@@ -346,10 +377,11 @@ void ArmController_Leader::update(const ros::Time& time, const ros::Duration& pe
   // 增加打印：位置误差
   Eigen::Vector3d pos_error = target.x_d - state.x;
   // [DEBUG] 增加了打印 gravity_comp(1) 以便观察重力矩大小
-  ROS_INFO_THROTTLE(0.5, "ERR_Pos: %.4f %.4f %.4f | G_Tau: %.2f | Final_Tau: %.2f",
+  ROS_INFO_THROTTLE(0.5, "ERR_Pos: %.4f %.4f %.4f | G_Tau: %.2f | Final_Tau: %.2f | Acc_Rate: %.1f%%",
       pos_error(0), pos_error(1), pos_error(2), 
       gravity_comp(1),   // 关节2的重力矩
-      tau_final(1));     // 最终下发给关节2的力矩
+      tau_final(1),     // 最终下发给关节2的力矩
+      acceptance_rate); 
   // -------------------
 
   //发送力矩到各个关节
@@ -416,23 +448,19 @@ void ArmController_Leader::cmdWrenchCallback(const geometry_msgs::WrenchStamped:
                    msg->wrench.torque.x, msg->wrench.torque.y, msg->wrench.torque.z;
 }
 
-void ArmController_Leader::gazeboStatesCallback(const gazebo_msgs::ModelStates::ConstPtr& msg) {
-  auto it = std::find(msg->name.begin(), msg->name.end(), object_name_);
-  if (it != msg->name.end()) {
-      int index = std::distance(msg->name.begin(), it);
-      const auto& p = msg->pose[index].position;
-      const auto& q = msg->pose[index].orientation;
-      const auto& v = msg->twist[index].linear;
-      const auto& w = msg->twist[index].angular;
+void ArmController_Leader::objectStateCallback(const nav_msgs::Odometry::ConstPtr& msg) {
+    const auto& p = msg->pose.pose.position;
+    const auto& q = msg->pose.pose.orientation;
+    const auto& v = msg->twist.twist.linear;
+    const auto& w = msg->twist.twist.angular;
 
-      true_pos_ << p.x, p.y, p.z;
-      Eigen::Quaterniond quat(q.w, q.x, q.y, q.z);
-      true_rot_ = quat.toRotationMatrix();
-      true_vel_ << v.x, v.y, v.z;
-      true_omega_ << w.x, w.y, w.z;
+    true_pos_ << p.x, p.y, p.z;
+    Eigen::Quaterniond quat(q.w, q.x, q.y, q.z);
+    true_rot_ = quat.toRotationMatrix();
+    true_vel_ << v.x, v.y, v.z;
+    true_omega_ << w.x, w.y, w.z;
 
-      sim_state_received_ = true;
-  }
+    sim_state_received_ = true;
 }
 
 }

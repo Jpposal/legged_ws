@@ -8,7 +8,7 @@
 #include <geometry_msgs/TwistStamped.h>
 #include <geometry_msgs/AccelStamped.h>
 #include <geometry_msgs/WrenchStamped.h>
-#include <gazebo_msgs/ModelStates.h>
+#include <nav_msgs/Odometry.h>
 
 // Pinocchio
 #include <pinocchio/fwd.hpp>
@@ -78,16 +78,18 @@ private:
   void cmdTwistCallback(const geometry_msgs::TwistStamped::ConstPtr& msg);
   void cmdAccelCallback(const geometry_msgs::AccelStamped::ConstPtr& msg);
   void cmdWrenchCallback(const geometry_msgs::WrenchStamped::ConstPtr& msg);
-  void gazeboStatesCallback(const gazebo_msgs::ModelStates::ConstPtr& msg);
+  void objectStateCallback(const nav_msgs::Odometry::ConstPtr& msg);
 
   // Gazebo Truth Data
-  ros::Subscriber sub_gazebo_states_;
-  std::string object_name_; 
+  ros::Subscriber sub_object_state_;
   bool sim_state_received_;
   Eigen::Vector3d true_pos_;
   Eigen::Vector3d true_vel_;
   Eigen::Vector3d true_omega_;
   Eigen::Matrix3d true_rot_;
+  
+  // Calibration
+  Eigen::Matrix3d calibration_rot_;
 };
 
 } // namespace arm_control

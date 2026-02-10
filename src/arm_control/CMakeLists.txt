@@ -77,5 +77,7 @@ install(FILES arm_controller_plugins.xml
 install(DIRECTORY launch config
   DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
 )
-add_executable(traj_publisher_node src/traj_publisher_node.cpp)
-target_link_libraries(traj_publisher_node ${catkin_LIBRARIES})
+add_executable(object_target_publisher src/object_target_publisher.cpp)
+target_link_libraries(object_target_publisher ${catkin_LIBRARIES})
+add_executable(object_state_publisher src/object_state_publisher.cpp)
+target_link_libraries(object_state_publisher ${catkin_LIBRARIES})
