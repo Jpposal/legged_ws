@@ -14,6 +14,10 @@
 #include <geometry_msgs/WrenchStamped.h>
 #include <nav_msgs/Odometry.h>
 #include <fstream>
+#include <chrono>
+#include <ctime>
+#include <iomanip>
+#include <sstream>
 
 namespace arm_control {
 
@@ -120,9 +124,10 @@ bool ArmController_Follower::init(hardware_interface::EffortJointInterface* hw, 
   currentQdot_.resize(numJoints_);
   initialQ_.resize(numJoints_);
 
-  eePosePub_ = nh.advertise<geometry_msgs::PoseStamped>("ee_pose", 1);                //发布末端位姿
+  eePosePub_ = nh.advertise<geometry_msgs::PoseStamped>("/follower_actual_pose", 1);                //发布末端位姿
   eeTwistPub_ = nh.advertise<geometry_msgs::TwistStamped>("ee_twist", 1);             //发布末端速度
   eeTargetPub_ = nh.advertise<geometry_msgs::PointStamped>("ee_pose_target", 1);      //发布末端目标位置
+  eeDesPosePub_ = nh.advertise<geometry_msgs::Vector3Stamped>("/follower_des_ee", 1); // [NEW] Desired EE Trajectory
 
   cmdPoseSub_ = nh.subscribe("command_pose", 1, &ArmController_Follower::cmdPoseCallback, this);      //接收目标位姿
   cmdTwistSub_ = nh.subscribe("command_twist", 1, &ArmController_Follower::cmdTwistCallback, this);   //接收目标速度
@@ -156,6 +161,14 @@ void ArmController_Follower::starting(const ros::Time& time) {
     currentQdot_(i) = jointHandles_[i].getVelocity();
     initialQ_(i) = currentQ_(i); 
   }
+  
+  // [DATA LOGGING] Initialize Log File (Text Format)
+  auto now = std::chrono::system_clock::now();
+  auto in_time_t = std::chrono::system_clock::to_time_t(now);
+  std::stringstream log_ss;
+  log_ss << "/root/legged_ws/logs/follower_debug_" << std::put_time(std::localtime(&in_time_t), "%Y%m%d_%H%M%S") << ".log";
+  debug_log_file_.open(log_ss.str());
+  // No CSV Header needed for block text format
 }
 
 void ArmController_Follower::update(const ros::Time& time, const ros::Duration& period) {
@@ -248,6 +261,9 @@ void ArmController_Follower::update(const ros::Time& time, const ros::Duration& 
   // Since we initialized with offset, this Wrench should be at EE.
   Eigen::VectorXd wrench_command = follower_algo_.tau; 
 
+  // [DEBUG] Save RAW wrench for logging before clamping
+  Eigen::VectorXd raw_wrench = wrench_command;
+
   static long long total_drem_steps = 0;
   static long long valid_drem_steps = 0;
   total_drem_steps++;
@@ -280,6 +296,17 @@ void ArmController_Follower::update(const ros::Time& time, const ros::Duration& 
   // [Fix Feedback Loop] Convert CoM Target -> EE Target
   Eigen::Vector3d r_des_world = R_des * anchor_offset_;
   Eigen::Vector3d x_des_ee = x_des_com - r_des_world;
+
+  // [NEW] Publish Desired EE Position
+  {
+      geometry_msgs::Vector3Stamped des_ee_msg;
+      des_ee_msg.header.stamp = time;
+      des_ee_msg.header.frame_id = "world";
+      des_ee_msg.vector.x = x_des_ee(0);
+      des_ee_msg.vector.y = x_des_ee(1);
+      des_ee_msg.vector.z = x_des_ee(2);
+      eeDesPosePub_.publish(des_ee_msg);
+  }
 
   // 复用已计算的 J 和 x_cur, R_cur
   double lambda = 0.01;
@@ -347,12 +374,6 @@ void ArmController_Follower::update(const ros::Time& time, const ros::Duration& 
   Eigen::VectorXd pd_term = kd_ * (qdot_ref - currentQdot_);
   Eigen::VectorXd tau_final = tau_model + pd_term + joint_tau;
 
-  static double last_print_time = 0.0;
-  if (t - last_print_time > 0.5) {
-      ROS_INFO_STREAM("M_Tau: " << tau_model.norm() << " | PD_Tau: " << pd_term.norm() << " | DREM_Tau: " << joint_tau.norm() << " | Wrench: " << wrench_command.norm() << " | J_cond: " << J.norm() << " | Acc_Rate: " << acceptance_rate << "%");
-      last_print_time = t;
-  }
-
   // 保留变量定义供兼容
   Eigen::VectorXd gravity_comp = pinocchioData_->g;
 
@@ -361,6 +382,81 @@ void ArmController_Follower::update(const ros::Time& time, const ros::Duration& 
   for (size_t i = 0; i < numJoints_; ++i) {
       if (tau_final(i) > torque_limit) tau_final(i) = torque_limit;
       if (tau_final(i) < -torque_limit) tau_final(i) = -torque_limit;
+  }
+
+  // [DATA LOGGING] 规范化Log打印 (10Hz)
+  static double last_log_time = 0;
+  if (t - last_log_time > 0.1) { 
+      last_log_time = t;
+      
+      std::stringstream ss;
+      ss << "\n";
+      ss << "========================= ROBOT FOLLOWER STATE =======================\n";
+      char line_buf[256];
+      snprintf(line_buf, sizeof(line_buf), " %-20s : %10.4f s\n", "Simulation Time", t);
+      ss << line_buf;
+      
+      // 关节角度
+      ss << " " << std::left << std::setw(20) << "Joint Angles (rad)" << " : [";
+      for(size_t i=0; i<numJoints_; ++i) {
+          snprintf(line_buf, sizeof(line_buf), "%7.3f%s", currentQ_(i), (i<numJoints_-1)?", ":"]\n");
+          ss << line_buf;
+      }
+
+      // 关节力矩
+      ss << " " << std::left << std::setw(20) << "Joint Torques (Nm)" << " : [";
+      for(size_t i=0; i<numJoints_; ++i) {
+          snprintf(line_buf, sizeof(line_buf), "%7.2f%s", tau_final(i), (i<numJoints_-1)?", ":"]\n");
+          ss << line_buf;
+      }
+
+      snprintf(line_buf, sizeof(line_buf), " %-20s : %10.4f\n", "DREM Force Norm", raw_wrench.norm());
+      ss << line_buf;
+
+      // Log RAW DREM Wrench Vector (Before Clamping)
+      ss << " " << std::left << std::setw(20) << "Raw Wrench" << " : [";
+      if (raw_wrench.size() == 6) {
+           for(long i=0; i<raw_wrench.size(); ++i) {
+               snprintf(line_buf, sizeof(line_buf), "%7.1f%s", raw_wrench(i), (i<raw_wrench.size()-1)?", ":"]\n");
+               ss << line_buf;
+           }
+      } else {
+           ss << "Size Error]\n";
+      }
+
+      // [NEW] Log Estimated Mass
+      Eigen::VectorXd estimates = follower_algo_.get_estimated_params();
+      double est_mass = (estimates.size() > 0) ? estimates(0) : 0.0;
+      snprintf(line_buf, sizeof(line_buf), " %-20s : %10.4f kg\n", "Est. Object Mass", est_mass);
+      ss << line_buf;
+
+      // Log detailed parameters
+      if (estimates.size() == 10) {
+          ss << " " << std::left << std::setw(20) << "Est. COM Moment" << " : [";
+          for(int i=1; i<=3; ++i) {
+              snprintf(line_buf, sizeof(line_buf), "%7.4f%s", estimates(i), (i<3)?", ":"]\n");
+              ss << line_buf;
+          }
+          ss << " " << std::left << std::setw(20) << "Est. Inertia Iso" << " : [";
+          for(int i=4; i<10; ++i) {
+              snprintf(line_buf, sizeof(line_buf), "%7.4f%s", estimates(i), (i<9)?", ":"]\n");
+              ss << line_buf;
+          }
+      }
+
+      snprintf(line_buf, sizeof(line_buf), " %-20s : %10.2f %%\n", "DREM Accept Rate", acceptance_rate);
+      ss << line_buf;
+      ss << "======================================================================\n";
+
+      std::string log_str = ss.str();
+      
+      // Print to Terminal
+      std::cout << log_str;
+      
+      // Write to File
+      if (debug_log_file_.is_open()) {
+          debug_log_file_ << log_str;
+      }
   }
 
   //发送力矩到各个关节

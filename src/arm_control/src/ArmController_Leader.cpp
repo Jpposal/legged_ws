@@ -16,6 +16,10 @@
 #include <std_msgs/Float64MultiArray.h>
 #include <fstream>
 #include <algorithm>
+#include <chrono>
+#include <ctime>
+#include <iomanip>
+#include <sstream>
 
 namespace arm_control {
 
@@ -153,6 +157,7 @@ bool ArmController_Leader::init(hardware_interface::EffortJointInterface* hw, ro
   eePosePub_ = nh.advertise<geometry_msgs::PoseStamped>("/leader_actual_pose", 1);                //发布末端位姿
   eeTwistPub_ = nh.advertise<geometry_msgs::TwistStamped>("ee_twist", 1);             //发布末端速度
   eeTargetPub_ = nh.advertise<geometry_msgs::PointStamped>("/leader_target_pose", 1);      //发布末端目标位置
+  eeDesPosePub_ = nh.advertise<geometry_msgs::Vector3Stamped>("/leader_des_ee", 1); // [NEW] Desired EE Trajectory
   dremParamsPub_ = nh.advertise<std_msgs::Float64MultiArray>("/leader_drem_params", 1); // 发布DREM参数
 
   cmdPoseSub_ = nh.subscribe("command_pose", 1, &ArmController_Leader::cmdPoseCallback, this);      //接收目标位姿
@@ -183,6 +188,14 @@ void ArmController_Leader::starting(const ros::Time& time) {
     currentQdot_(i) = jointHandles_[i].getVelocity();
     initialQ_(i) = currentQ_(i); 
   }
+  
+  // [DATA LOGGING] Initialize Log File (Text Format)
+  auto now = std::chrono::system_clock::now();
+  auto in_time_t = std::chrono::system_clock::to_time_t(now);
+  std::stringstream log_ss;
+  log_ss << "/root/legged_ws/logs/leader_debug_" << std::put_time(std::localtime(&in_time_t), "%Y%m%d_%H%M%S") << ".log";
+  debug_log_file_.open(log_ss.str());
+  // No CSV Header needed for block text format
 }
 
 void ArmController_Leader::update(const ros::Time& time, const ros::Duration& period) {
@@ -284,6 +297,9 @@ void ArmController_Leader::update(const ros::Time& time, const ros::Duration& pe
   leader_algo_.DREM(target, state, dt, t);
   wrench_command = leader_algo_.tau;
 
+  // [DEBUG] Save RAW wrench for logging before clamping
+  Eigen::VectorXd raw_wrench = wrench_command;
+
   static long long total_drem_steps = 0;
   static long long valid_drem_steps = 0;
   total_drem_steps++;
@@ -310,6 +326,17 @@ void ArmController_Leader::update(const ros::Time& time, const ros::Duration& pe
   // x_ee_des = x_com_des - R_des * offset
   Eigen::Vector3d r_des_world = R_des * anchor_offset_;
   Eigen::Vector3d x_des_ee = x_des_com - r_des_world;
+
+  // [NEW] Publish Desired EE Position
+  {
+      geometry_msgs::Vector3Stamped des_ee_msg;
+      des_ee_msg.header.stamp = time;
+      des_ee_msg.header.frame_id = "world";
+      des_ee_msg.vector.x = x_des_ee(0);
+      des_ee_msg.vector.y = x_des_ee(1);
+      des_ee_msg.vector.z = x_des_ee(2);
+      eeDesPosePub_.publish(des_ee_msg);
+  }
 
   double lambda = 0.01;
   Eigen::MatrixXd JJT = J * J.transpose();
@@ -367,22 +394,93 @@ void ArmController_Leader::update(const ros::Time& time, const ros::Duration& pe
       if (tau_final(i) < -torque_limit) tau_final(i) = -torque_limit;
   }
 
+  // [DATA LOGGING] 规范化Log打印 (10Hz)
+  static double last_print_time = 0;
+  if (t - last_print_time > 0.1) { 
+      last_print_time = t;
+      
+      std::stringstream ss;
+      ss << "\n";
+      ss << "========================= ROBOT LEADER STATE =========================\n";
+      char line_buf[256];
+      snprintf(line_buf, sizeof(line_buf), " %-20s : %10.4f s\n", "Simulation Time", t);
+      ss << line_buf;
+      
+      // 关节角度
+      ss << " " << std::left << std::setw(20) << "Joint Angles (rad)" << " : [";
+      for(size_t i=0; i<numJoints_; ++i) {
+          snprintf(line_buf, sizeof(line_buf), "%7.3f%s", currentQ_(i), (i<numJoints_-1)?", ":"]\n");
+          ss << line_buf;
+      }
+
+      // 关节力矩
+      ss << " " << std::left << std::setw(20) << "Joint Torques (Nm)" << " : [";
+      for(size_t i=0; i<numJoints_; ++i) {
+          snprintf(line_buf, sizeof(line_buf), "%7.2f%s", tau_final(i), (i<numJoints_-1)?", ":"]\n");
+          ss << line_buf;
+      }
+
+      snprintf(line_buf, sizeof(line_buf), " %-20s : %10.4f\n", "DREM Force Norm", raw_wrench.norm());
+      ss << line_buf;
+
+      // Log RAW DREM Wrench Vector (Before Clamping)
+      ss << " " << std::left << std::setw(20) << "Raw Wrench" << " : [";
+      if (raw_wrench.size() == 6) {
+           for(long i=0; i<raw_wrench.size(); ++i) {
+               snprintf(line_buf, sizeof(line_buf), "%7.1f%s", raw_wrench(i), (i<raw_wrench.size()-1)?", ":"]\n");
+               ss << line_buf;
+           }
+      } else {
+           ss << "Size Error]\n";
+      }
+
+      // [NEW] Log Estimated Mass
+      Eigen::VectorXd estimates = leader_algo_.get_estimated_params();
+      double est_mass = (estimates.size() > 0) ? estimates(0) : 0.0;
+      snprintf(line_buf, sizeof(line_buf), " %-20s : %10.4f kg\n", "Est. Object Mass", est_mass);
+      ss << line_buf;
+
+      // Log detailed parameters
+      if (estimates.size() == 10) {
+          ss << " " << std::left << std::setw(20) << "Est. COM Moment" << " : [";
+          for(int i=1; i<=3; ++i) {
+              snprintf(line_buf, sizeof(line_buf), "%7.4f%s", estimates(i), (i<3)?", ":"]\n");
+              ss << line_buf;
+          }
+          ss << " " << std::left << std::setw(20) << "Est. Inertia Iso" << " : [";
+          for(int i=4; i<10; ++i) {
+              snprintf(line_buf, sizeof(line_buf), "%7.4f%s", estimates(i), (i<9)?", ":"]\n");
+              ss << line_buf;
+          }
+      }
+
+      snprintf(line_buf, sizeof(line_buf), " %-20s : %10.2f %%\n", "DREM Accept Rate", acceptance_rate);
+      ss << line_buf;
+      ss << "======================================================================\n";
+
+      std::string log_str = ss.str();
+      
+      // Print to Terminal
+      std::cout << log_str;
+
+      // Write to File (Formatted)
+      if (debug_log_file_.is_open()) {
+          debug_log_file_ << log_str;
+          // debug_log_file_.flush(); // 10Hz frequency, let OS handle flushing to save IO
+      }
+  }
+
   // 发布DREM参数，以便分析发散原因
-  // std_msgs::Float64MultiArray params_msg;
-  // Eigen::VectorXd hats = leader_algo_.get_hat_o();
-  // for(int i=0; i<10; i++) params_msg.data.push_back(hats(i));
-  // dremParamsPub_.publish(params_msg);
+  std_msgs::Float64MultiArray params_msg;
+  Eigen::VectorXd hats = leader_algo_.get_estimated_params();
+  for(int i=0; i<hats.size(); i++) params_msg.data.push_back(hats(i));
+  dremParamsPub_.publish(params_msg); // Now uncommented and using correct getter
 
   // 打印debug信息：维度、算法输出力矩、雅可比转换力矩、最终下发力矩
   // 增加打印：位置误差
-  Eigen::Vector3d pos_error = target.x_d - state.x;
-  // [DEBUG] 增加了打印 gravity_comp(1) 以便观察重力矩大小
-  ROS_INFO_THROTTLE(0.5, "ERR_Pos: %.4f %.4f %.4f | G_Tau: %.2f | Final_Tau: %.2f | Acc_Rate: %.1f%%",
-      pos_error(0), pos_error(1), pos_error(2), 
-      gravity_comp(1),   // 关节2的重力矩
-      tau_final(1),     // 最终下发给关节2的力矩
-      acceptance_rate); 
-  // -------------------
+  // Eigen::Vector3d pos_error = target.x_d - state.x;
+  // [CLEANUP] 移除了旧的 ROS_INFO 以避免日志重复
+
 
   //发送力矩到各个关节
   for (size_t i = 0; i < numJoints_; ++i) {

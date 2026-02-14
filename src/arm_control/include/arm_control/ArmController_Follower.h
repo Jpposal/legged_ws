@@ -9,6 +9,7 @@
 #include <geometry_msgs/AccelStamped.h>
 #include <geometry_msgs/WrenchStamped.h>
 #include <nav_msgs/Odometry.h>
+#include <fstream>
 
 // Pinocchio
 #include <pinocchio/fwd.hpp>
@@ -56,6 +57,7 @@ private:
   ros::Publisher eePosePub_;
   ros::Publisher eeTwistPub_;
   ros::Publisher eeTargetPub_;
+  ros::Publisher eeDesPosePub_; // [NEW] Desired EE Trajectory
 
   // Subscribers
   ros::Subscriber cmdPoseSub_;
@@ -90,6 +92,9 @@ private:
   
   // Calibration
   Eigen::Matrix3d calibration_rot_;
+  
+  // Data Logging
+  std::ofstream debug_log_file_;
 };
 
 } // namespace arm_control

@@ -103,15 +103,15 @@ int main(int argc, char** argv) {
         double ax_ref = 0, ay_ref = 0, az_ref = 0;
 
         if (plane == "yz") {
-            // Figure-8 (Lemniscate-ish)
-            y_ref = center_y + current_radius * sin(omega * t);
-            z_ref = center_z + current_radius * 0.5 * sin(2.0 * omega * t); // Scaled Z to 0.5R to maintain aspect
+            // Circle Trajectory
+            y_ref = -0.05 + current_radius * sin_t; // center_y is -0.05
+            z_ref = center_z + current_radius * cos_t;
             
-            vy_ref = current_radius * omega * cos(omega * t);
-            vz_ref = current_radius * 0.5 * (2.0 * omega) * cos(2.0 * omega * t);
+            vy_ref = current_radius * omega * cos_t;
+            vz_ref = -current_radius * omega * sin_t;
             
-            ay_ref = -current_radius * omega * omega * sin(omega * t);
-            az_ref = -current_radius * 0.5 * (4.0 * omega * omega) * sin(2.0 * omega * t);
+            ay_ref = -current_radius * omega * omega * sin_t;
+            az_ref = -current_radius * omega * omega * cos_t;
         } 
         else if (plane == "xz") {
             x_ref = center_x + current_radius * sin_t;

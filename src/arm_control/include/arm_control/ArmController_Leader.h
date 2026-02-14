@@ -8,6 +8,7 @@
 #include <geometry_msgs/TwistStamped.h>
 #include <geometry_msgs/WrenchStamped.h>
 #include <nav_msgs/Odometry.h>
+#include <fstream>
 
 // Pinocchio
 #include <pinocchio/fwd.hpp>
@@ -56,6 +57,7 @@ private:
   ros::Publisher eePosePub_;
   ros::Publisher eeTwistPub_;
   ros::Publisher eeTargetPub_;
+  ros::Publisher eeDesPosePub_; // [NEW] Desired EE Trajectory
   ros::Publisher dremParamsPub_; // [NEW]
 
   // Subscribers
@@ -84,6 +86,9 @@ private:
   Eigen::Vector3d true_vel_;
   Eigen::Vector3d true_omega_;
   Eigen::Matrix3d true_rot_;
+
+  // Data Logging
+  std::ofstream debug_log_file_;
 };
 
 } // namespace arm_control

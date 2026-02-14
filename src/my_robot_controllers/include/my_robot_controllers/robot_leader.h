@@ -42,6 +42,10 @@ public:
     void initial(Vector3d r_);
     void robotupdate(Target target,State state,double dt);
     void DREM(Target target,State state,double dt,double t);
+    
+    // [NEW] Getter for estimated parameters
+    Eigen::VectorXd get_estimated_params() { return state_robot.hat_o; }
+    
     Eigen::VectorXd F;
     Eigen::VectorXd tau;
 
